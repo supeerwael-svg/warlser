@@ -1,3 +1,80 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Detect Capacitor major version
+        id: cap
+        run: |
+          MAJOR=$(node -p "require('./node_modules/@capacitor/core/package.json').version.split('.')[0]")
+          echo "Capacitor major: $MAJOR"
+          echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Java (17 for Capacitor 6, 21 for Capacitor 7+)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ fromJSON(steps.cap.outputs.major) >= 7 && '21' || '17' }}
+          cache: gradle
+
+      - name: Build web app
+        run: npm run build
+
+      - name: Create the android project if it is missing or incomplete
+        run: |
+          RES=android/app/src/main/res
+          if [ ! -d android ]; then
+            echo "android folder not found: generating it"
+            npx cap add android
+          elif [ ! -f "$RES/values/strings.xml" ] || [ ! -f "$RES/values/styles.xml" ] || [ ! -f "$RES/xml/file_paths.xml" ] || [ ! -d "$RES/mipmap-hdpi" ]; then
+            echo "android folder is INCOMPLETE (resources missing): regenerating it"
+            rm -rf android
+            npx cap add android
+          else
+            echo "android folder is complete: keeping it as is"
+          fi
+          echo "--- resources present ---"
+          ls -R android/app/src/main/res | head -n 40
+
+      - name: Patch AndroidManifest (camera + barcode scanner)
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("android/app/src/main/AndroidManifest.xml")
+          s = p.read_text(encoding="utf-8")
+          add = ""
+          if "android.permission.CAMERA" not in s:
+              add += '    <uses-permission android:name="android.permission.CAMERA" />\n'
+          if "android.hardware.camera" not in s:
+              add += '    <uses-feature android:name="android.hardware.camera" android:required="false" />\n'
+          if add:
               s = s.replace("</manifest>", add + "</manifest>")
           if "com.google.mlkit.vision.DEPENDENCIES" not in s:
               meta = '        <meta-data android:name="com.google.mlkit.vision.DEPENDENCIES" android:value="barcode_ui" />\n'
@@ -56,4 +133,3 @@
             --title "School Admin (latest)" \
             --notes "Build #${{ github.run_number }} - version 1.0.${{ github.run_number }}" \
             --target "${{ github.sha }}"
-
