@@ -1,0 +1,59 @@
+              s = s.replace("</manifest>", add + "</manifest>")
+          if "com.google.mlkit.vision.DEPENDENCIES" not in s:
+              meta = '        <meta-data android:name="com.google.mlkit.vision.DEPENDENCIES" android:value="barcode_ui" />\n'
+              s = s.replace("</application>", meta + "    </application>")
+          p.write_text(s, encoding="utf-8")
+          print(s)
+          PY
+
+      - name: Set app version from the run number
+        run: |
+          sed -i -E "s/versionCode [0-9]+/versionCode ${{ github.run_number }}/; s/versionName \"[^\"]*\"/versionName \"1.0.${{ github.run_number }}\"/" android/app/build.gradle
+          grep -nE "versionCode|versionName" android/app/build.gradle
+
+      - name: Use the stable debug keystore (so updates install over the old version)
+        run: |
+          if [ -f school-debug.keystore ]; then
+            mkdir -p ~/.android
+            cp school-debug.keystore ~/.android/debug.keystore
+            echo "Using school-debug.keystore"
+          else
+            echo "::warning::school-debug.keystore not found in the repository root. The APK is signed with a random key and will NOT install over a previous build."
+          fi
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Build debug APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Show permissions, version and signer inside the APK
+        run: |
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)"
+          "$BT/aapt" dump badging "$APK" | grep -E "^package:|uses-permission|uses-feature" || true
+          echo "--- signer ---"
+          "$BT/apksigner" verify --print-certs "$APK" | head -n 3 || true
+
+      - name: Rename APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk school-admin.apk
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: school-admin-apk
+          path: school-admin.apk
+
+      - name: Publish to the "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --cleanup-tag -y || true
+          gh release create latest school-admin.apk \
+            --title "School Admin (latest)" \
+            --notes "Build #${{ github.run_number }} - version 1.0.${{ github.run_number }}" \
+            --target "${{ github.sha }}"
+
